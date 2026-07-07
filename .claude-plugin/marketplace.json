@@ -1,0 +1,11 @@
+{
+  "name": "qian-skills",
+  "owner": { "name": "Qian Qin" },
+  "plugins": [
+    {
+      "name": "tdd-agent-team",
+      "source": "./",
+      "description": "Multi-agent TDD/BDD development team orchestration with gated review workflow"
+    }
+  ]
+}

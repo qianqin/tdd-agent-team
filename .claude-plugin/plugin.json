@@ -1,0 +1,9 @@
+{
+  "name": "tdd-agent-team",
+  "description": "Multi-agent TDD/BDD development team orchestration — a lead agent (Tina) dispatches developer, code review, QA, security, and devops subagents through a gated workflow",
+  "version": "1.0.0",
+  "author": { "name": "Qian Qin" },
+  "repository": "https://github.com/qianqin/tdd-agent-team",
+  "license": "MIT",
+  "keywords": ["tdd", "bdd", "agents", "multi-agent", "code-review", "testing"]
+}
