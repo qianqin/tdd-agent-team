@@ -22,10 +22,16 @@ STEP 4:  Dev's final response reports DONE with test and build results
          means Tina resolves the blocker and re-dispatches)
 
 STEP 5:  Tina dispatches nick-picker, betty-bugsniff, and sam-shields IN PARALLEL
-STEP 6:  All 3 must return PASS. Any FAIL → Tina sends the findings to the dev
+         (plus polly-pixels when the task's dev was fiona-frontend)
+STEP 6:  All dispatched reviewers must return PASS. Any FAIL → Tina sends the findings to the dev
          (same agent if the harness allows, else a fresh dev) → dev fixes → re-review from STEP 5
 
-         ⛔ GATE 2 — Do NOT proceed until ALL THREE reviewers return PASS
+         ⛔ GATE 2 — Do NOT proceed until ALL dispatched reviewers return PASS
+         (3 normally, 4 when polly-pixels was dispatched for a frontend task)
+
+STEP 6.5: Tina dispatches wally-wordsmith in the task worktree to update any docs
+         affected by the change. Docs-only commits; no re-review loop. "No docs
+         affected" is a valid DONE.
 
 STEP 7:  Tina dispatches daisy-deployer with the worktree path for deploy & verification
 STEP 8:  If deploy test fails → daisy rolls back, reports failure details → Tina sends
