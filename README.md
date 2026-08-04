@@ -2,11 +2,11 @@
 
 A Claude Code skill that turns a feature spec into a gated, test-driven, multi-agent workflow.
 
-**Tina Taskmaster** (your main session) breaks the spec into tasks with BDD scenarios, then dispatches specialized subagents — each with minimal context (its role file + task details only):
+**Tina Taskmaster** (your main session) breaks the spec into tasks with BDD scenarios, then dispatches specialized subagents — each a dedicated plugin agent type (shown under its own name in the UI) with minimal context (its role prompt + task details only):
 
 | Agent | Role |
 |---|---|
-| billy-builder-\<task\> | Developer — strict RED/GREEN/REFACTOR TDD, one per parallel task |
+| billy-builder | Developer — strict RED/GREEN/REFACTOR TDD, one per parallel task |
 | nick-picker | Code review — quality & spec compliance, reviews the diff |
 | betty-bugsniff | QA — test quality, coverage, runs the suite; integration tests on main |
 | sam-shields | Security review — attacker mindset, severity-graded, dependency CVE audit |
@@ -21,7 +21,7 @@ Every task passes four gates: dev done → all three reviews PASS → deploy ver
 /plugin install tdd-agent-team@qian-skills
 ```
 
-Manual alternative: clone this repo and copy `skills/tdd-agent-team/` into `~/.claude/skills/`.
+Manual alternative: clone this repo, copy `skills/tdd-agent-team/` into `~/.claude/skills/`, and copy the files in `agents/` into `~/.claude/agents/`.
 
 ## Use
 
@@ -42,10 +42,10 @@ Tina will read your spec, propose a task plan with BDD scenarios, and wait for y
 ## Layout
 
 ```
+agents/                         # One agent definition per teammate (name + role prompt)
 skills/tdd-agent-team/
 ├── SKILL.md                    # Tina's orchestration instructions
 └── references/
     ├── workflow.md             # The gated per-task workflow (Tina only)
-    ├── templates.md            # /docs/ file templates
-    └── agents/                 # One minimal role file per subagent
+    └── templates.md            # /docs/ file templates
 ```
