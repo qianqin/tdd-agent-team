@@ -45,7 +45,8 @@ If nothing remains: report "No new sessions to dream about." and STOP (do not ad
 `last_dream`).
 
 **STEP 3 — Digest in parallel.** Dispatch one `tdd-agent-team:danny-digester` subagent
-per transcript, all in one message. Each prompt contains ONLY: the transcript path, the
+(or bare `danny-digester`, whichever appears in your available agent types) per
+transcript, all in one message. Each prompt contains ONLY: the transcript path, the
 workspace root, and today's date. Each returns `SESSION:` header lines plus
 `- scope | fact` candidate lines (scopes: `user`, `machine`, `orchestration`,
 `repo:<name>`).
