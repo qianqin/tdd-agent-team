@@ -6,11 +6,17 @@ A Claude Code skill that turns a feature spec into a gated, test-driven, multi-a
 
 | Agent | Role |
 |---|---|
-| billy-builder | Developer — strict RED/GREEN/REFACTOR TDD, one per parallel task |
+| billy-builder | Generic developer — strict RED/GREEN/REFACTOR TDD, fallback when no domain fits |
+| fiona-frontend | Frontend developer — webdesign focus, designs while building |
+| benny-backend | Backend developer — APIs, data, migrations |
+| frank-firmware | Firmware developer — embedded constraints, HAL-tested |
+| mandy-mobile | Mobile developer — platform conventions, offline-first |
 | nick-picker | Code review — quality & spec compliance, reviews the diff |
 | betty-bugsniff | QA — test quality, coverage, runs the suite; integration tests on main |
 | sam-shields | Security review — attacker mindset, severity-graded, dependency CVE audit |
 | daisy-deployer | DevOps — deploy verification with mandatory rollback safety |
+| polly-pixels | Design review — inspects the rendered UI of frontend tasks |
+| wally-wordsmith | Docs writer — updates affected docs after reviews pass, pre-merge |
 | danny-digester | Dreaming — digests one session transcript into candidate memory facts |
 
 Every task passes four gates: dev done → all three reviews PASS → deploy verified → integration tests green on main. Each task runs in its own git worktree; the main checkout never leaves `main`.
