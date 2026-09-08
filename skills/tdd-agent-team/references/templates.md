@@ -138,3 +138,33 @@ Pick the template that matches the project type.
 ### Rollback
 - **Procedure**: Install previous APK/IPA
 ```
+
+### Release / Production (CI/CD-triggered)
+
+Every `/docs/DEVOPS.md` needs this section too: the test-target blocks above cover
+daisy's pre-merge deploy check, this one covers the release at STEP 12.
+
+```markdown
+### Target: Production, deployed by CI/CD
+
+### Trigger
+- **Release event**: <e.g. push to `main`, or push of tag `vX.Y.Z`>
+- **Tag format**: <e.g. `v1.2.3`, or "none — main pushes deploy">
+
+### Pipeline
+- **Watch command**: <e.g. `gh run watch --exit-status`, `gh run list --branch main`>
+- **Expected duration**: <minutes — how long before a stall is suspicious>
+- **Logs**: <where to read failures>
+
+### Verify
+- **Health endpoint**: <e.g. `curl https://prod.example.com/health`>
+- **Smoke tests**: <commands proving the deployed version actually serves>
+- **Version check**: <how to confirm the deployed version is the pushed commit/tag>
+- **Wait time**: <seconds after the pipeline reports success>
+
+### Rollback
+- **Preferred**: <redeploy previous known-good release, e.g. previous tag or image>
+- **Git fallback**: `git revert <sha> && git push` — never force-push published history
+- **Migrations**: <how to reverse, or "forward-only — do not roll back the DB">
+- **Who to tell**: <channel or person, if a human must know>
+```

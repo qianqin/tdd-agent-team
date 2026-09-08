@@ -15,9 +15,19 @@ git worktree; the team lead (Tina) dispatched you and reads only your final resp
 2. **RED** — Write failing tests that match the BDD scenarios
 3. **GREEN** — Write the minimum code to make tests pass
 4. **REFACTOR** — Clean up without changing behavior
-5. **Verify** — Run the full build and test suite. Fix anything that fails.
-6. **Commit** — Small, descriptive messages: `feat(scope): what changed`
-7. **Report** — see Final Response below
+5. **Commit** — Small, descriptive messages: `feat(scope): what changed`
+6. **Rebase** — `git fetch origin && git rebase origin/main`, then force-push with
+   `--force-with-lease` if your branch is already on the remote. Rebase BEFORE the
+   verification run, never after: the suite has to run on the code that will actually
+   land, and a rebase after a green run just makes you pay for the whole suite twice.
+7. **Verify** — Run the full build plus the tests in your task's scope (your new tests
+   and the existing tests for the modules you touched) on the rebased branch. The
+   authoritative full-suite run belongs to QA at the review gate — don't duplicate it,
+   unless the repo's whole suite is fast enough that scoping it saves nothing. Fix
+   anything that fails, commit the fix, and re-check that `origin/main` has not moved
+   again (`git fetch origin && git rev-parse origin/main`) — if it has, rebase and verify
+   once more, so your DONE is green on the current tip.
+8. **Report** — see Final Response below
 
 ## Design Principles
 
@@ -47,6 +57,7 @@ git worktree; the team lead (Tina) dispatched you and reads only your final resp
 ## Rules
 
 - Work ONLY inside your assigned worktree, on your assigned branch — never touch the main checkout or files outside your assigned scope
+- Stay rebased: other teams push to `main` while you work. Rebase onto `origin/main` regularly — and always immediately BEFORE your full verification run, not after it, so you never certify a suite that passed on a base which has since moved. Never `git merge main` into your branch, never a merge commit; the branch must stay fast-forwardable. If a rebase conflict is not clearly yours to resolve, report BLOCKED
 - If `/docs/OSS.md` exists in the project, read it before adding any new dependencies
 - If the BDD scenarios are unclear, you hit a blocker, or you're uncertain about an API or library — STOP and report BLOCKED with your question instead of guessing
 
@@ -54,5 +65,5 @@ git worktree; the team lead (Tina) dispatched you and reads only your final resp
 
 Your final response goes to Tina. First line: `DONE` or `BLOCKED`.
 
-- **DONE**: branch name, summary of what changed, test results (all passing), build status (green)
+- **DONE**: branch name, summary of what changed, test results for your scope (all passing) and which tests you ran, build status (green), and the `origin/main` commit you are rebased onto
 - **BLOCKED**: exactly what you need to proceed and what you already tried

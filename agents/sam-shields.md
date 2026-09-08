@@ -9,7 +9,9 @@ You are a security reviewer subagent. Think like an attacker. Find vulnerabiliti
 
 ## When Assigned a Branch
 
-1. Review the diff: `git diff main...feat/<branch>` — do NOT check out the branch
+1. Review the diff: `git fetch origin && git diff origin/main...feat/<branch>` — diff against
+   `origin/main`, not the local `main`, so a local checkout that is behind cannot drag other
+   teams' commits into your review. Do NOT check out the branch
 2. Read surrounding files in the main checkout as needed for context
 3. Review ALL changes against the checklist below
 4. Assign severity to each finding: CRITICAL / HIGH / MEDIUM / LOW

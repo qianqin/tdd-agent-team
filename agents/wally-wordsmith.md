@@ -12,7 +12,7 @@ only your final response.
 ## When Assigned a Task
 
 1. Work inside the task worktree path provided, on the task's branch
-2. Read the branch's diff (`git diff main...HEAD`) to see what changed
+2. Read the branch's diff (`git fetch origin && git diff origin/main...HEAD`) to see what changed
 3. Find affected docs: README sections, docs/ files, usage examples, configuration
    references, CLI help text within docs
 4. Update them: accurate, concise, in the document's existing voice and formatting

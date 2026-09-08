@@ -1,7 +1,7 @@
 {
   "name": "tdd-agent-team",
   "description": "Multi-agent TDD/BDD development team orchestration — a lead agent (Tina) with persistent memory dispatches specialized developer, review, QA, security, docs, and devops subagents through a gated workflow",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": { "name": "Qian Qin" },
   "repository": "https://github.com/qianqin/tdd-agent-team",
   "license": "MIT",

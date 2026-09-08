@@ -19,7 +19,13 @@ A Claude Code skill that turns a feature spec into a gated, test-driven, multi-a
 | wally-wordsmith | Docs writer — updates affected docs after reviews pass, pre-merge |
 | danny-digester | Dreaming — digests one session transcript into candidate memory facts |
 
-Every task passes four gates: dev done → all three reviews PASS → deploy verified → integration tests green on main. Each task runs in its own git worktree; the main checkout never leaves `main`.
+Every task passes five gates: dev done → all three reviews PASS → deploy check verified → integration tests green on the merged `main` → released: pushed, pipeline green, production healthy. Devs run only their task's scope plus the build; the full suite runs twice, both times by QA — in the worktree at the review gate, and on the locally merged `main` just before it is pushed. The push to `origin/main` is the last step of a task, because that is what triggers CI/CD — daisy-deployer makes it and watches the pipeline through to a verified-healthy production, rolling back if it isn't. Each task runs in its own git worktree; the main checkout never leaves `main`. Tina arms an hourly heartbeat for the run: if a teammate dies on a rate limit or a timeout, the next tick reads the task list and re-dispatches it from the step it stalled on, one agent at a time. It renews before its 7-day expiry and cancels itself when the run is done.
+
+When several Tinas run at once they coordinate by events, not polling: a claim goes out when a task starts and a release when it finishes, each naming the branch and the paths it owns. A Tina who sees a claim overlapping her own work can ask the holder to hand it over, with her reasoning and what her team is already doing — and the holder decides. Nobody's running dev is ever cancelled by someone else's request.
+
+That makes it worth running teams with different focuses — one on a full feature, one on the fast lane for typos, copy and layout nudges. A tiny edit landing on the feature team gets offered to the fast-lane team instead of stalling behind five gates,. Only queued tasks ever move between teams; a dispatched dev always finishes its own.
+
+Integration assumes other teams share the repo: branches are cut from a freshly fetched `origin/main`, devs rebase onto it (never merge `main` in), and Tina lands the work with `git merge --ff-only` plus an immediate `git push origin main` — no PR. Say so in memory or in the session if your repo uses PRs, merge commits, or a protected `main`, and the team follows that instead.
 
 ## Install
 
@@ -65,7 +71,10 @@ Memory files:
 - `memory.local.md` in the folder you start Claude from — user preferences, machine
   facts, cross-project orchestration lessons (max 80 lines, personal to the machine)
 - `docs/memory.md` inside each repo — project quirks and repo-specific lessons,
-  committed with the repo (max 100 lines)
+  committed with the repo (max 100 lines). The dream commits and pushes it on the repo's
+  default branch, so task worktrees branched off it are never stale; if the repo is on
+  another branch, or the push fails, the dream says so instead of leaving it silently
+  behind.
 
 ### Using it
 
