@@ -139,6 +139,16 @@ Pick the template that matches the project type.
 - **Procedure**: Install previous APK/IPA
 ```
 
+### Test Suite (release queue)
+
+Optional. It matters only when several Tinas share this repo on one machine. Missing
+means `yes`.
+
+```markdown
+### Test Suite
+- **parallel suites**: yes   <!-- no = full-suite runs clash (fixed ports, shared database, one device): no pre-testing, the release queue runs one suite at a time at the head -->
+```
+
 ### Release / Production (CI/CD-triggered)
 
 Every `/docs/DEVOPS.md` needs this section too: the test-target blocks above cover
