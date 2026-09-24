@@ -74,6 +74,7 @@ $(git rev-parse --git-common-dir)/release-queue/
 | `tested_tree` | tree hash of the last PASSing pre-test (empty if none) |
 | `spec_on` | the `<ticket-name>@<sha>` list the pre-test was stacked on, in order |
 | `updated` | ISO timestamp of the last write |
+| `nudged` | `<head ticket name> <ISO time>` once she has nudged a silent head (empty otherwise) |
 
 Only the owning Tina writes her ticket. The one exception is moving a stale ticket to
 `abandoned/` (see Stale and Blocking Tickets).
@@ -113,7 +114,10 @@ wait. Their stack is the most likely to change.
 
 **Invalidation.** On every broadcast, a waiting Tina compares `spec_on` with the
 current tickets ahead of her (names and `head` shas). Match → nothing to do. Mismatch
-→ rebuild and pre-test again (subject to depth and priority).
+→ rebuild the stack (git merges only, no suite) and compare its tree hash with
+`tested_tree`. Equal → the pre-test still holds; only `spec_on` is updated. This is the
+normal case when a team ahead releases cleanly and leaves. Different → pre-test again
+(subject to depth and priority).
 
 **Merge conflict while building** → her branch conflicts with a team ahead. She keeps
 her place, waits for that team's release, then has her dev rebase. That changes her
@@ -163,7 +167,7 @@ nothing else to wake her. So every heartbeat tick with a ticket in the queue re-
 - **Am I the head?** Yes and not yet `releasing` → take the slot and start STEP 9,
   just as a broadcast would have made her do.
 - **Is my pre-test current?** Within train depth and `spec_on` no longer matches the
-  tickets ahead → rebuild and pre-test again (priority rules apply).
+  tickets ahead → apply the Invalidation rule (rebuild the stack, compare trees).
 - **Is the head silent?** She is #2 and the head's `updated` is older than the nudge
   and abandon windows → nudge or abandon per Stale and Blocking Tickets. The tick
   measures from `updated`, since the broadcast that started the clock may be the one
@@ -177,14 +181,16 @@ suite for a peer, and never moves a ticket other than a silent head's (to
 except tidy her own leftovers.
 
 The hourly tick is a backstop, not the clock: the 5 / 15 minute nudge and abandon
-windows still run off broadcasts. The heartbeat only catches what a lost broadcast
+windows run off broadcasts and one-shot crons. The heartbeat only catches what a lost broadcast
 left behind.
 
 ## Stale and Blocking Tickets
 
 - **Silent head.** When a broadcast makes a ticket the head and its state is not
   `releasing` within **5 minutes** of that broadcast, the #2 owner sends a direct `TEAM-QUEUE-NUDGE`
-  to the head's `session`.
+  to the head's `session` and records `nudged` in her own ticket. An idle Tina has no
+  clock, so the #2 owner arms a one-shot `CronCreate` (`recurring: false`) for each
+  window (5 minutes, then 15) and deletes it when the head changes or answers.
 - **Abandon.** If that session is gone from `ListAgents`, or does not answer within
   **15 minutes** of the nudge, the #2 owner moves the ticket to `abandoned/`, broadcasts
   `TEAM-QUEUE`, and tells her user which team was skipped and why. Moving a ticket
