@@ -76,7 +76,8 @@ Heartbeat rules:
   never starts a new task, never advances a gate, and never pushes. One exception: the
   release queue's Heartbeat Check acts on this team's OWN ticket exactly as a missed
   `TEAM-QUEUE` would have made her act — including taking the head slot and starting
-  STEP 9. It never acts for another team.
+  STEP 9. It never acts for another team, except for moving a silent head's ticket to
+  `abandoned/` as #2 (never a `releasing` one), which tidies the queue and runs nothing.
 - The integrated task list is the state of record — the heartbeat reads it, not the
   transcript, because it may fire after a rate-limit gap.
 - After a rate limit, re-dispatch stalled work ONE agent at a time, not the whole parallel
@@ -183,7 +184,10 @@ running dev always finishes its own.
 
 **Skip this whole section when you are alone.** No peer Tina in `ListAgents` means no
 queue: STEP 9–12 run as written below and no ticket is ever written. A later
-`TEAM-HELLO` turns the queue on from the next task that clears Gate 3.
+`TEAM-HELLO` turns the queue on from the next task that clears Gate 3. If a task of
+yours is in STEP 9–12 without a ticket when that HELLO arrives, create a ticket for it
+at once in `state: releasing` and broadcast `TEAM-QUEUE`, so the newcomer queues behind
+a release that is already running instead of overlapping it.
 
 With peers running, teams build and review in parallel, then queue after Gate 3 and
 integrate, test and release ONE AT A TIME. The head of the queue runs STEP 9 through
@@ -199,15 +203,22 @@ never tracks it. Never put it in the working tree.
 
 ```bash
 Q="$(cd "$(git rev-parse --git-common-dir)" && pwd)/release-queue"
-mkdir -p "$Q/tickets" "$Q/abandoned"
+mkdir -p "${Q:?}/tickets" "${Q:?}/abandoned"
 ```
 
+Shell variables do not survive between tool calls. Start EVERY command that touches the
+queue with the `Q=…` line, and always write `"${Q:?}"`, so an unset `Q` aborts instead
+of pointing at `/`.
+
 - A ticket is a directory `tickets/<ns-timestamp>-<team>-<task>/` holding one file,
-  `ticket`. Create the directory with `mkdir` (atomic, and it fails if the name exists).
-  Get the timestamp with `python3 -c 'import time; print(time.time_ns())'`, because
-  macOS `date` has no nanoseconds.
-- **Queue order = `ls "$Q/tickets" | sort`. The head is the first entry; your position
-  is your line number.** There is no lock file.
+  `ticket`. Take the timestamp and create the directory in ONE command, so no ticket
+  stamped later can be created first. `mkdir` is atomic and fails if the name exists.
+  Use `python3` because macOS `date` has no nanoseconds:
+  `T="${Q:?}/tickets/$(python3 -c 'import time; print(time.time_ns())')-<team>-<task>" && mkdir "$T" && echo "$T"`
+- **Queue order = `ls "${Q:?}/tickets" | sort`. The head is the first entry; your
+  position is your line number.** There is no lock file. A ticket directory with no
+  `ticket` file yet is still being written: it counts for the order, but read it again
+  before acting on it.
 - Write a ticket through a temp file so a reader never sees half of it: write
   `ticket.tmp` in the ticket directory, then `mv ticket.tmp ticket`. Refresh `updated`
   on every write.
@@ -218,7 +229,7 @@ Ticket file, one `key: value` per line:
 
 | Key | Meaning |
 |---|---|
-| `team` | this team's name |
+| `team` | this team's name as used in its `TEAM-HELLO`: the session name, unless the user named the team |
 | `session` | this session's name as peers see it in `ListAgents` (used for liveness and nudges) |
 | `task` | task name |
 | `branch` | `feat/<task>` |
@@ -227,6 +238,7 @@ Ticket file, one `key: value` per line:
 | `state` | `waiting` · `pretesting` · `ready` · `releasing` · `releasing:suite` |
 | `tested_tree` | tree hash of the last PASSing pre-test (empty if none) |
 | `spec_on` | the `<ticket-name>@<sha>` list the pre-test was stacked on, in queue order, comma-separated |
+| `pretesting_on` | while a pre-test runs: its stack tree and its `spec_on` list (empty otherwise) |
 | `updated` | ISO timestamp of the last write |
 | `nudged` | `<head ticket name> <ISO time>` once this team nudged a silent head (empty otherwise) |
 
@@ -239,10 +251,13 @@ Ticket file, one `key: value` per line:
 2. **Wait** — pre-test per the Merge Train, then leave the task parked until a
    `TEAM-QUEUE` or a heartbeat tick arrives.
 3. **Head** — on every `TEAM-QUEUE` and every heartbeat tick, re-read `tickets/`. If
-   your ticket is first and not yet `releasing`: set `state: releasing`, broadcast
-   `TEAM-QUEUE`, and run STEP 9 → Gate 5.
-4. **Leave** — after Gate 5, a failure, or a drop: `rm -rf "$Q/tickets/<name>"`, then
-   broadcast `TEAM-QUEUE` (plus `TEAM-DONE` when the task is finished or dropped).
+   your ticket is first and not yet `releasing`: set `state: releasing`, then re-read
+   your ticket from `tickets/`. If it is gone (a peer abandoned it a moment earlier),
+   do NOT start: rejoin at the back. Otherwise broadcast `TEAM-QUEUE` and run STEP 9 →
+   Gate 5. With a pre-test of your own still in flight, let it finish before STEP 10:
+   its result may make STEP 10 a no-run.
+4. **Leave** — after Gate 5, a failure, or a drop: `rm -rf "${Q:?}/tickets/<name>"`,
+   then broadcast `TEAM-QUEUE` (plus `TEAM-DONE` when the task is finished or dropped).
 
 **A ticket commits to one exact commit.** If the branch changes while waiting (a fix,
 more work, a rebase), leave and rejoin at the back. Anyone can check this: `head` vs
@@ -262,23 +277,29 @@ a suite run at the head. Missing setting = `yes`.
 **Build the stack** (Tina, git only, no suite):
 
 ```bash
+P=.worktrees/pretest-<task>
 git fetch origin
-git worktree add --detach .worktrees/pretest-<task> origin/main
-cd .worktrees/pretest-<task>
-git merge --no-ff --no-edit <head sha of the ticket at #1>   # then #2 … up to yours, in queue order
-git merge --no-ff --no-edit feat/<task>
-git rev-parse HEAD^{tree}                                      # the stack tree
+git worktree add --detach "$P" origin/main
+git -C "$P" merge --no-ff --no-edit <head sha of the ticket at #1>   # then #2 … in queue order
+git -C "$P" merge --no-ff --no-edit feat/<task>
+git -C "$P" rev-parse HEAD^{tree}                                      # the stack tree
 ```
 
-(No `origin` remote → use local `main` as the base.)
+Run the block as ONE command from the main checkout, since `P` does not survive
+between calls. Never `cd` into the throwaway worktree: your working directory persists
+between calls, and the remove below uses the same relative path. No `origin` remote →
+use local `main` as the base.
 
 - Stack tree equals your `tested_tree` → the earlier pre-test still holds. Update
   `spec_on`, remove the throwaway worktree, and you're done.
-- Otherwise set `state: pretesting` and dispatch betty-bugsniff in **pre-test mode**
-  with the throwaway worktree path and the stack tree. On PASS (her `tested tree:`
-  equals the stack tree), record `tested_tree` and `spec_on` and set `state: ready`. On
-  FAIL see Failure Handling. Either way, then
+- Otherwise set `state: pretesting`, record `pretesting_on`, and dispatch
+  betty-bugsniff in **pre-test mode** with the throwaway worktree path and the stack
+  tree. On PASS (her `tested tree:` equals the stack tree), move `pretesting_on` into
+  `tested_tree` and `spec_on` and set `state: ready`. On FAIL, set `state: waiting`
+  and see Failure Handling. Either way, clear `pretesting_on` and run
   `git worktree remove --force .worktrees/pretest-<task>`.
+- A pre-test result never changes a `releasing` or `releasing:suite` state. If your
+  ticket became head while it ran, only record `tested_tree` and `spec_on`.
 
 **Invalidation.** On every `TEAM-QUEUE` and heartbeat tick, a Tina within depth
 compares `spec_on` with the tickets now ahead of her (names and `head` shas).
@@ -288,11 +309,19 @@ compares `spec_on` with the tickets now ahead of her (names and `head` shas).
     when a team ahead released cleanly and left.
   - Different → pre-test again (depth and priority apply).
 - A ticket that moves into depth with no `tested_tree` pre-tests.
+- While your own pre-test is running (`state: pretesting`), Invalidation waits: the run
+  finishes, and then its result goes through the rules above. Only Release Priority
+  stops a running pre-test.
 
-**Merge conflict while building** → her branch conflicts with a team ahead.
-`git merge --abort`, remove the throwaway worktree, and keep her place. Wait for that
-team to leave the queue, then dispatch her dev to rebase onto `origin/main`. That
-changes her `head`, so she leaves and rejoins at the back.
+**Merge conflict while building.** Run `git -C .worktrees/pretest-<task> merge --abort`,
+remove the throwaway worktree, set `state: waiting`, and keep your place. Then:
+- A conflict on the final merge (your own branch) is yours, and only a conflict on the
+  final merge is. Wait for the conflicting team ahead to leave the queue, then dispatch
+  your dev to rebase onto `origin/main`. That changes your `head`, so leave and rejoin
+  at the back. Once your ticket is the head, this rebase is simply STEP 9's rebase and
+  you keep the slot.
+- A conflict while merging a ticket ahead of you is between those teams, not yours.
+  Skip pre-testing until the tickets ahead change, and keep your place.
 
 **Correctness never depends on the pre-test.** At the head, STEP 10 compares the real
 merged tree with `tested_tree`, and any difference means betty runs the suite. A stale
@@ -303,8 +332,11 @@ pre-test costs a run and nothing else.
 - Pre-tests always run under `nice -n 19`.
 - When the head needs a real suite run at STEP 10, it sets `state: releasing:suite` and
   broadcasts `TEAM-QUEUE` BEFORE dispatching betty. Every Tina with a pre-test in flight
-  stops her OWN pre-test (`TaskStop` on that betty dispatch, `state: waiting`) and
-  restarts it once the head's ticket leaves `releasing:suite`. A team only ever stops
+  stops her OWN pre-test (`TaskStop` on that betty dispatch, `state: waiting`, and
+  `git worktree remove --force` on the throwaway worktree, clearing `pretesting_on`)
+  and restarts it once the head's
+  ticket leaves `releasing:suite`. Never start a pre-test while the head is in
+  `releasing:suite`. A team only ever stops
   its own run.
 - A head that skipped the suite pre-empts nothing: pushing and watching CI does not
   load this machine.
@@ -317,7 +349,9 @@ nothing else to wake it. So every heartbeat tick with a ticket in the queue re-r
 `tickets/` exactly as if a `TEAM-QUEUE` had arrived:
 
 - **Am I still in line?** Your ticket is in `abandoned/` → delete it and rejoin at the
-  back. Its `head` no longer matches `git rev-parse <branch>` → leave and rejoin.
+  back. Its `head` no longer matches `git rev-parse <branch>` → leave and rejoin — but
+  apply this only while your state is not `releasing` or `releasing:suite`. A head
+  mid-release may be rebasing in STEP 9, and it updates `head` itself.
 - **Am I the head?** Yes and not yet `releasing` → take the slot and start STEP 9.
 - **Is my pre-test current?** Within depth and `spec_on` no longer matches → apply
   Invalidation.
@@ -326,6 +360,9 @@ nothing else to wake it. So every heartbeat tick with a ticket in the queue re-r
   and is more than 15 minutes old with no answer → abandon it. The tick measures from
   `updated` and `nudged`, since the broadcast that started the clock may be the one
   that got lost.
+- **Is the head orphaned?** You are #2, the head is `releasing` or `releasing:suite`,
+  and its `session` is gone from `ListAgents` → an orphaned release (see Stale
+  Tickets).
 
 With no ticket, the tick only tidies this team's own leftovers. The hourly tick is a
 backstop, not the clock.
@@ -342,13 +379,25 @@ backstop, not the clock.
 - **Abandon.** If the head's session is gone from `ListAgents`, or has not answered 15
   minutes after the nudge: `mv "$Q/tickets/<name>" "$Q/abandoned/"`, broadcast
   `TEAM-QUEUE`, and tell your user which team was skipped and why. If the `mv` fails
-  because the ticket is gone, someone else already acted: re-read and move on. Moving
-  a ticket only tidies the queue. Never push, deploy or run anything for another team.
+  because the ticket is gone, someone else already acted: re-read and move on. After a
+  successful `mv`, re-read the moved ticket. If it now says `releasing` or
+  `releasing:suite`, the head took its slot while you moved it: move it back to
+  `tickets/` and do not broadcast. Moving a ticket only tidies the queue. Never push,
+  deploy or run anything for another team.
+- **Orphaned release.** A head in `releasing` or `releasing:suite` whose session is gone
+  from `ListAgents` is never nudged and never moved automatically. Its local `main` may
+  hold an unpushed merge, or production may be mid-deploy. Tell your user which team's
+  release is orphaned, its state, branch and `head`, and move the ticket to
+  `abandoned/` only when your user says so. A live head that is `releasing` is never
+  nudged or abandoned, however long its pipeline takes.
 - **Coming back.** Finding your own ticket in `abandoned/` → delete it, and rejoin at
   the back if the task still needs releasing.
-- **Own leftovers.** At setup and on each heartbeat tick, move this team's tickets
-  whose `session` is not this session to `abandoned/`. They are leftovers from a
-  crashed earlier run.
+- **Own leftovers.** At setup and on each heartbeat tick, look for this team's tickets
+  whose `session` is not this session and is not in `ListAgents`. They are leftovers
+  from a crashed earlier run of this team: delete them outright (nobody will come back
+  for them). A leftover in `releasing` or `releasing:suite` is an orphaned release:
+  tell your user first. A ticket whose session is alive belongs to a live peer: leave
+  it alone, even if its `team` matches yours.
 
 ### Failure Handling
 
@@ -467,7 +516,8 @@ STEP 2:  Tina dispatches a dev with BDD scenarios, worktree path, and branch nam
 STEP 3:  Dev writes tests first (RED), implements (GREEN), refactors (REFACTOR), commits,
          rebases onto origin/main, and only then runs the build + the tests in the task's
          scope — so DONE is green on the current tip, not on the base the branch was cut
-         from. The full suite is betty's run at STEP 5
+         from. The full suite is betty's: at STEP 5 when the task is tagged
+         `full-suite-at-gate2: yes`, otherwise its pre-test or STEP 10
 STEP 4:  Dev's final response reports DONE with test and build results
 
          ⛔ GATE 1 — Do NOT proceed until the dev reports DONE (a BLOCKED response
@@ -550,9 +600,10 @@ STEP 12: RELEASE — Tina dispatches daisy-deployer with the merged commit, the 
          dev and the fix re-enters at STEP 5 (in a queue: delete the ticket and
          broadcast `TEAM-QUEUE` once the rollback is confirmed).
 
-STEP 13: After Gate 5, Tina removes the worktree, deletes the branch (local and remote),
-         and refreshes the main checkout (`git fetch origin && git pull --ff-only`). In
-         a queue: delete the ticket, broadcast `TEAM-QUEUE`, then `TEAM-DONE`.
+STEP 13: After Gate 5 — in a queue, delete the ticket and broadcast `TEAM-QUEUE` FIRST —
+         Tina removes the worktree, deletes the branch (local and remote), refreshes
+         the main checkout (`git fetch origin && git pull --ff-only`), and sends
+         `TEAM-DONE`.
 STEP 14: Tina assigns the next task
 ```
 
