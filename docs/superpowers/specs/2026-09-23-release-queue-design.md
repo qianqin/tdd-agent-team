@@ -40,6 +40,8 @@ identical code.
    of truth; messages are only the wake-up.
 10. **Skipped entirely when alone.** No peer Tina → no queue, same as the existing
     coordination protocol.
+11. **The heartbeat checks the line.** Each cron tick re-reads the queue as if a
+    broadcast had arrived, so a missed `TEAM-QUEUE` never strands a team.
 
 ## Storage
 
@@ -83,7 +85,7 @@ Only the owning Tina writes her ticket. The one exception is moving a stale tick
    her claim to `STEP: queued #n`. Other tasks in her plan keep moving; only this one
    is parked.
 2. **Wait** — pre-test per the Merge Train section, then idle on this task until a
-   broadcast arrives.
+   broadcast or a heartbeat tick arrives (see Heartbeat Check).
 3. **Head** — on any broadcast, each Tina re-reads `tickets/`. The first ticket's
    owner sets `state: releasing`, broadcasts, and runs:
    - STEP 9: `git fetch origin`, dev rebases onto `origin/main` if needed, ff-merge
@@ -149,6 +151,35 @@ It is sent to **every** Tina from `ListAgents`, not only to the next in line: a
 departure mid-queue invalidates the pre-tests of everyone behind it. Receivers treat it
 as a wake-up and re-read `tickets/`; the message itself authorises nothing.
 
+## Heartbeat Check
+
+Broadcasts are the fast path, not the only one. A `TEAM-QUEUE` can be missed (the
+session was mid-turn, a peer crashed before broadcasting), and a parked Tina has
+nothing else to wake her. So every heartbeat tick with a ticket in the queue re-reads
+`tickets/` exactly as if a `TEAM-QUEUE` had arrived:
+
+- **Am I still in line?** Her ticket is in `abandoned/` → delete it and rejoin at the
+  back. Its `head` no longer matches `git rev-parse <branch>` → leave and rejoin.
+- **Am I the head?** Yes and not yet `releasing` → take the slot and start STEP 9,
+  just as a broadcast would have made her do.
+- **Is my pre-test current?** Within train depth and `spec_on` no longer matches the
+  tickets ahead → rebuild and pre-test again (priority rules apply).
+- **Is the head silent?** She is #2 and the head's `updated` is older than the nudge
+  and abandon windows → nudge or abandon per Stale and Blocking Tickets. The tick
+  measures from `updated`, since the broadcast that started the clock may be the one
+  she missed.
+
+This is the heartbeat's one exception to "never advances a gate". It is allowed
+because the heartbeat only acts on the queue's state, which is the source of truth,
+and only on her own ticket. It still never pushes for anyone else, never runs a
+suite for a peer, and never moves a ticket other than a silent head's (to
+`abandoned/`). With no ticket in the queue, the tick does nothing queue-related
+except tidy her own leftovers.
+
+The hourly tick is a backstop, not the clock: the 5 / 15 minute nudge and abandon
+windows still run off broadcasts. The heartbeat only catches what a lost broadcast
+left behind.
+
 ## Stale and Blocking Tickets
 
 - **Silent head.** When a broadcast makes a ticket the head and its state is not
@@ -193,7 +224,7 @@ queue FIFO like everyone else.
 | File | Change |
 |---|---|
 | `skills/tdd-agent-team/references/workflow.md` | New **Release Queue** section (everything above). STEP 8→9 gains "join queue, wait for head". STEP 10's skip rule becomes the `tested_tree` comparison. STEP 12's rejection rule keeps the slot. Gate 2 uses the per-task tag. `TEAM-QUEUE` / `TEAM-QUEUE-NUDGE` join the event table. The fast-lane block notes FIFO queueing. |
-| `skills/tdd-agent-team/SKILL.md` | The integration and coordination bullets point at the queue. The heartbeat also tidies the team's own stale tickets and never advances the queue. The betty row in the roster table covers the pre-test mode. |
+| `skills/tdd-agent-team/SKILL.md` | The integration and coordination bullets point at the queue. The heartbeat prompt gains the Heartbeat Check (re-read the queue, act on her own ticket, tidy her own stale tickets), and the "keep the heartbeat honest" rule names it as the one exception to "never advances a gate". The betty row in the roster table covers the pre-test mode. |
 | `agents/betty-bugsniff.md` | New pre-test mode: run niced in the given throwaway worktree, stoppable on request, report PASS/FAIL with the tested tree hash. The Gate 2 run is scoped when the task says `full-suite-at-gate2: no`. |
 | `agents/daisy-deployer.md` | Before pushing, confirm that the dispatch says this team holds the head of the queue (or that no queue is active). |
 | `skills/tdd-agent-team/references/templates.md` (DEVOPS.md template) | `parallel suites: yes|no` setting, default `yes`. |
