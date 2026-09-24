@@ -45,7 +45,9 @@ for hours. Tina arms an hourly heartbeat before the first dispatch:
   (e.g. `"17 * * * *"`), `recurring: true`, and a prompt that says: read the integrated
   task list, and for every task marked in_progress check whether its dispatched agent is
   still alive (`ListAgents`, task list state, the agent's result). Re-dispatch anything
-  that died — rate limit, timeout, error — from the STEP it was at. Touch nothing else.
+  that died — rate limit, timeout, error — from the STEP it was at. Then run the release
+  queue's Heartbeat Check (see Release Queue) when this team has a ticket or leftover
+  tickets. Touch nothing else.
 - Put the arming date in the prompt itself (`heartbeat armed <YYYY-MM-DD>`) — a recurring
   job auto-expires 7 days after it is created, and that line is the only state a later
   tick needs to know its own age.
@@ -71,7 +73,10 @@ work in progress.
 Heartbeat rules:
 
 - The heartbeat is a checker, not a second orchestrator. It resumes what stalled; it
-  never starts a new task, never advances a gate, and never pushes.
+  never starts a new task, never advances a gate, and never pushes. One exception: the
+  release queue's Heartbeat Check acts on this team's OWN ticket exactly as a missed
+  `TEAM-QUEUE` would have made her act — including taking the head slot and starting
+  STEP 9. It never acts for another team.
 - The integrated task list is the state of record — the heartbeat reads it, not the
   transcript, because it may fire after a rate-limit gap.
 - After a rate limit, re-dispatch stalled work ONE agent at a time, not the whole parallel
@@ -101,6 +106,8 @@ arrive on their own and are handled at the next step boundary.
 | Answering a HELLO | `TEAM-CLAIM` (one message, all tasks) | every task this team currently owns |
 | A task is added to the plan or dispatched (STEP 1) | `TEAM-CLAIM` | task name, branch, STEP, paths owned, dev role |
 | A task clears Gate 5, is dropped, or is handed over (STEP 13) | `TEAM-DONE` | task name, branch, paths released, and why (done / dropped / handed to <team>) |
+| Release queue: joining, leaving, a state change to or off `releasing` / `releasing:suite`, abandoning a ticket | `TEAM-QUEUE` (to EVERY Tina) | ticket name, what changed, the current queue order |
+| Release queue: the head has been silent for 5 minutes (sent by #2 only) | `TEAM-QUEUE-NUDGE` (direct to the head's session) | ticket name, how long it has been head |
 | A task arrives that another team is better placed to run | `TEAM-OFFER` | task, class, paths, why it suits them better; they reply `TEAM-OFFER-ACCEPT` or `TEAM-OFFER-DECLINE` |
 | This team runs out of work | `TEAM-IDLE` (once, optional) | focus and availability — an invitation, not a request |
 
@@ -172,6 +179,187 @@ running dev always finishes its own.
 - A takeover changes who does the work, never the gates: the receiving team starts at
   STEP 1 with its own worktree and branch.
 
+## Release Queue — One Release at a Time
+
+**Skip this whole section when you are alone.** No peer Tina in `ListAgents` means no
+queue: STEP 9–12 run as written below and no ticket is ever written. A later
+`TEAM-HELLO` turns the queue on from the next task that clears Gate 3.
+
+With peers running, teams build and review in parallel, then queue after Gate 3 and
+integrate, test and release ONE AT A TIME. The head of the queue runs STEP 9 through
+Gate 5 and holds the slot until Gate 5, so deploys never overlap and a rollback only
+ever reverts the head's own release. Waiting teams pre-test their branch stacked on
+everyone ahead of them, so their turn at the head is usually a release with no suite
+run.
+
+### Storage
+
+The queue lives in the git common dir. Every worktree of this clone shares it, and git
+never tracks it. Never put it in the working tree.
+
+```bash
+Q="$(cd "$(git rev-parse --git-common-dir)" && pwd)/release-queue"
+mkdir -p "$Q/tickets" "$Q/abandoned"
+```
+
+- A ticket is a directory `tickets/<ns-timestamp>-<team>-<task>/` holding one file,
+  `ticket`. Create the directory with `mkdir` (atomic, and it fails if the name exists).
+  Get the timestamp with `python3 -c 'import time; print(time.time_ns())'`, because
+  macOS `date` has no nanoseconds.
+- **Queue order = `ls "$Q/tickets" | sort`. The head is the first entry; your position
+  is your line number.** There is no lock file.
+- Write a ticket through a temp file so a reader never sees half of it: write
+  `ticket.tmp` in the ticket directory, then `mv ticket.tmp ticket`. Refresh `updated`
+  on every write.
+- Only the owning Tina writes her ticket. The one other change anyone makes is moving a
+  stale ticket directory to `abandoned/` (see Stale Tickets).
+
+Ticket file, one `key: value` per line:
+
+| Key | Meaning |
+|---|---|
+| `team` | this team's name |
+| `session` | this session's name as peers see it in `ListAgents` (used for liveness and nudges) |
+| `task` | task name |
+| `branch` | `feat/<task>` |
+| `worktree` | the task worktree path |
+| `head` | the branch commit sha this ticket will release |
+| `state` | `waiting` · `pretesting` · `ready` · `releasing` · `releasing:suite` |
+| `tested_tree` | tree hash of the last PASSing pre-test (empty if none) |
+| `spec_on` | the `<ticket-name>@<sha>` list the pre-test was stacked on, in queue order, comma-separated |
+| `updated` | ISO timestamp of the last write |
+| `nudged` | `<head ticket name> <ISO time>` once this team nudged a silent head (empty otherwise) |
+
+### Lifecycle
+
+1. **Join (STEP 8.5)** — after Gate 3. If `origin/main` moved past the branch's base,
+   apply STEP 9's rebase rules first. Then create the ticket (`state: waiting`, `head` =
+   `git rev-parse feat/<task>`), broadcast `TEAM-QUEUE`, and send `TEAM-CLAIM` with
+   `STEP: queued #n`. Other tasks in the plan keep moving; only this one is parked.
+2. **Wait** — pre-test per the Merge Train, then leave the task parked until a
+   `TEAM-QUEUE` or a heartbeat tick arrives.
+3. **Head** — on every `TEAM-QUEUE` and every heartbeat tick, re-read `tickets/`. If
+   your ticket is first and not yet `releasing`: set `state: releasing`, broadcast
+   `TEAM-QUEUE`, and run STEP 9 → Gate 5.
+4. **Leave** — after Gate 5, a failure, or a drop: `rm -rf "$Q/tickets/<name>"`, then
+   broadcast `TEAM-QUEUE` (plus `TEAM-DONE` when the task is finished or dropped).
+
+**A ticket commits to one exact commit.** If the branch changes while waiting (a fix,
+more work, a rebase), leave and rejoin at the back. Anyone can check this: `head` vs
+`git rev-parse <branch>`. The one exception is the head's own STEP 9 rebase, which is
+part of its release: update `head` and carry on. If that rebase changed the dev's own
+code, the task goes back to STEP 5, so leave the queue and rejoin after Gate 3.
+
+### Merge Train
+
+**Depth 2.** Only the first two tickets behind the head (positions #2 and #3)
+pre-test. Deeper tickets wait, because their stack is the most likely to change.
+
+**Opt-out.** If `/docs/DEVOPS.md` sets `parallel suites: no` (suites that clash over
+ports, databases or devices), there is no pre-testing at all. It's a strict queue with
+a suite run at the head. Missing setting = `yes`.
+
+**Build the stack** (Tina, git only, no suite):
+
+```bash
+git fetch origin
+git worktree add --detach .worktrees/pretest-<task> origin/main
+cd .worktrees/pretest-<task>
+git merge --no-ff --no-edit <head sha of the ticket at #1>   # then #2 … up to yours, in queue order
+git merge --no-ff --no-edit feat/<task>
+git rev-parse HEAD^{tree}                                      # the stack tree
+```
+
+(No `origin` remote → use local `main` as the base.)
+
+- Stack tree equals your `tested_tree` → the earlier pre-test still holds. Update
+  `spec_on`, remove the throwaway worktree, and you're done.
+- Otherwise set `state: pretesting` and dispatch betty-bugsniff in **pre-test mode**
+  with the throwaway worktree path and the stack tree. On PASS (her `tested tree:`
+  equals the stack tree), record `tested_tree` and `spec_on` and set `state: ready`. On
+  FAIL see Failure Handling. Either way, then
+  `git worktree remove --force .worktrees/pretest-<task>`.
+
+**Invalidation.** On every `TEAM-QUEUE` and heartbeat tick, a Tina within depth
+compares `spec_on` with the tickets now ahead of her (names and `head` shas).
+- Match → nothing to do.
+- Mismatch → rebuild the stack and compare its tree with `tested_tree`.
+  - Equal → the pre-test still holds; update `spec_on` only. This is the normal case
+    when a team ahead released cleanly and left.
+  - Different → pre-test again (depth and priority apply).
+- A ticket that moves into depth with no `tested_tree` pre-tests.
+
+**Merge conflict while building** → her branch conflicts with a team ahead.
+`git merge --abort`, remove the throwaway worktree, and keep her place. Wait for that
+team to leave the queue, then dispatch her dev to rebase onto `origin/main`. That
+changes her `head`, so she leaves and rejoins at the back.
+
+**Correctness never depends on the pre-test.** At the head, STEP 10 compares the real
+merged tree with `tested_tree`, and any difference means betty runs the suite. A stale
+pre-test costs a run and nothing else.
+
+### Release Priority
+
+- Pre-tests always run under `nice -n 19`.
+- When the head needs a real suite run at STEP 10, it sets `state: releasing:suite` and
+  broadcasts `TEAM-QUEUE` BEFORE dispatching betty. Every Tina with a pre-test in flight
+  stops her OWN pre-test (`TaskStop` on that betty dispatch, `state: waiting`) and
+  restarts it once the head's ticket leaves `releasing:suite`. A team only ever stops
+  its own run.
+- A head that skipped the suite pre-empts nothing: pushing and watching CI does not
+  load this machine.
+
+### Heartbeat Check
+
+Broadcasts are the fast path, not the only one. A `TEAM-QUEUE` can be missed (the
+session was mid-turn, or a peer crashed before broadcasting), and a parked task has
+nothing else to wake it. So every heartbeat tick with a ticket in the queue re-reads
+`tickets/` exactly as if a `TEAM-QUEUE` had arrived:
+
+- **Am I still in line?** Your ticket is in `abandoned/` → delete it and rejoin at the
+  back. Its `head` no longer matches `git rev-parse <branch>` → leave and rejoin.
+- **Am I the head?** Yes and not yet `releasing` → take the slot and start STEP 9.
+- **Is my pre-test current?** Within depth and `spec_on` no longer matches → apply
+  Invalidation.
+- **Is the head silent?** You are #2, the head is not `releasing`, and its `updated` is
+  more than 5 minutes old → nudge (unless `nudged` already names it). `nudged` names it
+  and is more than 15 minutes old with no answer → abandon it. The tick measures from
+  `updated` and `nudged`, since the broadcast that started the clock may be the one
+  that got lost.
+
+With no ticket, the tick only tidies this team's own leftovers. The hourly tick is a
+backstop, not the clock.
+
+### Stale Tickets
+
+- **Silent head.** When you become #2, or the head changes while you are #2, and the
+  head is not `releasing`: arm a one-shot `CronCreate` (`recurring: false`) about 5
+  minutes out. If it fires and that ticket is still head and still not `releasing`,
+  send `TEAM-QUEUE-NUDGE` to its `session`, record `nudged` in your ticket, and arm a
+  second one-shot 15 minutes out. Any reply from that session or any change to its
+  ticket counts as an answer. `CronDelete` pending checks the moment the head changes
+  or answers.
+- **Abandon.** If the head's session is gone from `ListAgents`, or has not answered 15
+  minutes after the nudge: `mv "$Q/tickets/<name>" "$Q/abandoned/"`, broadcast
+  `TEAM-QUEUE`, and tell your user which team was skipped and why. If the `mv` fails
+  because the ticket is gone, someone else already acted: re-read and move on. Moving
+  a ticket only tidies the queue. Never push, deploy or run anything for another team.
+- **Coming back.** Finding your own ticket in `abandoned/` → delete it, and rejoin at
+  the back if the task still needs releasing.
+- **Own leftovers.** At setup and on each heartbeat tick, move this team's tickets
+  whose `session` is not this session to `abandoned/`. They are leftovers from a
+  crashed earlier run.
+
+### Failure Handling
+
+| Case | Handling |
+|---|---|
+| Head's Gate 4 suite fails | STEP 11 as usual (reset local `main` to `origin/main`), delete the ticket, broadcast. The fix goes through its gates from STEP 5 and rejoins at the back. |
+| Pre-test fails | Re-run pre-test mode on `origin/main` + own branch only. Fails → the branch is at fault: leave, fix from STEP 5, rejoin. Passes → the combination with a team ahead is at fault: keep the place, tell that team which tests broke (information, not an instruction), and wait for it to leave before pre-testing again. |
+| Push rejected (`main` moved outside the queue) | Back to STEP 9, keeping the slot. |
+| Gate 5 FAIL (pipeline or production) | daisy rolls back first. Then delete the ticket and broadcast; the fix re-enters at STEP 5. |
+| Tina is alone | No queue. STEP 9–12 run as written. |
+
 ## Task Classes — Features and the Fast Lane
 
 Not every task deserves five gates. Classify each one before dispatching:
@@ -192,13 +380,17 @@ STEP 5    ONE reviewer: nick-picker, or polly-pixels instead when the change is 
           one reviewer PASS)
 STEP 7    SKIPPED — no pre-merge deploy check, unless the change touches build or deploy
           configuration, in which case it is not a tiny task
-STEP 9-13 unchanged: local ff-only merge, betty's FULL suite on the merged main
-          (Gate 4), then daisy's release push and pipeline watch (Gate 5)
+STEP 8.5  unchanged: with peers running, the task joins the release queue — FIFO like
+          every other task, no jumping (a jump would invalidate every pre-test behind it)
+STEP 9-13 unchanged: local ff-only merge, betty's FULL suite on the merged main unless
+          a pre-test already passed that exact tree (Gate 4), then daisy's release push
+          and pipeline watch (Gate 5)
 ```
 
-The two gates that never get skipped are the full suite on the merged `main` and the
-release watch — `main` must stay green and the push deploys, and a one-line change is
-perfectly capable of breaking both.
+The two gates that never get skipped are a full suite on the exact tree being pushed
+(at STEP 10, or the pre-test whose tree matches it) and the release watch — `main`
+must stay green and the push deploys, and a one-line change is perfectly capable of
+breaking both.
 
 **Promotion beats optimism.** The moment a tiny task turns out to need a real code change,
 a new test, or a second round of review, it stops being tiny: Tina reclassifies it as a
@@ -228,17 +420,23 @@ The full suite is expensive, so it runs where it proves something, and nowhere e
   the existing tests for the modules touched, on the rebased branch, with a full build.
   Fast feedback, no duplicated full runs. (Exception: a repo whose whole suite is quick
   — scoping it saves nothing there, so just run it all.)
-- **betty-bugsniff at STEP 5 (Gate 2)** — the FULL suite in the worktree. This is the
-  authoritative pre-merge run, and because the dev rebased before DONE it runs on the
-  current tip. A failure outside the task's scope is a real regression, caught here
-  rather than by the dev.
+- **betty-bugsniff at STEP 5 (Gate 2)** — decided per task. At planning Tina tags each
+  task `full-suite-at-gate2: yes|no`, with a reason when it is `yes` (repo-wide blast
+  radius: build config, shared core module, test infrastructure). `yes` → betty runs
+  the FULL suite in the worktree, as the authoritative pre-merge run. `no` → Gate 2 is
+  betty's test-quality review plus the task's scoped tests and the build, and the
+  task's first full run comes later on the integrated tree. Tiny fast-lane tasks carry
+  the tag too.
+- **betty-bugsniff in pre-test mode** (release queue only) — the FULL suite, niced, on
+  a throwaway stack of `origin/main` + the teams ahead + this branch. She reports the
+  tested tree hash, and a match at the head makes STEP 10 a no-run.
 - **betty-bugsniff at STEP 10** — the FULL suite on the merged local `main`, BEFORE the
-  push, catching what only the combination of landed branches can break. It runs
-  pre-push because the push triggers CI/CD: a red main would already be deploying.
+  push, unless that exact tree already passed. It runs pre-push because the push
+  triggers CI/CD: a red main would already be deploying.
 
-So a distant regression costs one review round-trip instead of a full-suite run on every
-dev iteration. If a task's blast radius is genuinely repo-wide, Tina says so in the task
-details and asks the dev for a full run at STEP 3 too.
+So a task normally gets ONE full run: its pre-test when it queued behind other teams,
+or STEP 10 at the head or when alone. A second full run happens only for a task tagged
+`full-suite-at-gate2: yes`.
 
 ## Branch & Worktree Rules
 
@@ -276,7 +474,9 @@ STEP 4:  Dev's final response reports DONE with test and build results
          means Tina resolves the blocker and re-dispatches)
 
 STEP 5:  Tina dispatches nick-picker, betty-bugsniff, and sam-shields IN PARALLEL
-         (plus polly-pixels when the task's dev was fiona-frontend)
+         (plus polly-pixels when the task's dev was fiona-frontend). Betty's dispatch
+         carries the task's `full-suite-at-gate2` tag: `yes` → full suite in the
+         worktree; `no` → test-quality review plus scoped tests and the build
 STEP 6:  All dispatched reviewers must return PASS. Any FAIL → Tina sends the findings to the dev
          (same agent if the harness allows, else a fresh dev) → dev fixes → re-review from STEP 5
 
@@ -296,46 +496,63 @@ STEP 8:  If deploy test fails → daisy rolls back, reports failure details → 
 
          ⛔ GATE 3 — Do NOT proceed until daisy-deployer returns PASS
 
+STEP 8.5: RELEASE QUEUE — skipped when alone. Otherwise Tina joins the queue (ticket,
+         `TEAM-QUEUE`, claim `STEP: queued #n`) and parks this task. It pre-tests per
+         the Merge Train while waiting, and the rest of the plan keeps moving. STEP 9
+         starts only when this ticket is the head: `state: releasing`, broadcast, go.
+
 STEP 9:  Sync and integrate LOCALLY — do not push yet. Tina runs `git fetch origin`.
          The dev already rebased before its verification run, so this is normally a
          no-op; it only bites when other teams pushed during the review gates. If
          `origin/main` has advanced past the branch's base, Tina dispatches the task's
          dev to rebase onto `origin/main` in the worktree, resolve conflicts, re-run the
          task's scoped tests, and force-push with `--force-with-lease` if the branch is
-         on the remote. If the rebase changed the dev's own code → re-review from STEP 5;
-         if it only resolved trivial conflicts and the scoped tests pass → continue.
+         on the remote. If the rebase changed the dev's own code → re-review from STEP 5
+         (in a queue: leave it, and rejoin after Gate 3); if it only resolved trivial
+         conflicts and the scoped tests pass → continue (in a queue: update the
+         ticket's `head` to the rebased sha).
          Then, in the main checkout: `git pull --ff-only` → `git merge --ff-only
          feat/<task>`. If the ff-only merge is rejected, main moved again → back to the
          rebase. Local `main` now holds exactly the tree that will be published.
 STEP 10: Tina dispatches betty-bugsniff to run the FULL suite on the local `main` — the
-         tree from STEP 9, before it is pushed. May be skipped only when no other commit
-         landed on `origin/main` since the branch's last rebase, because then this tree
-         is bit-identical to what betty already passed at Gate 2 — otherwise mandatory.
+         tree from STEP 9, before it is pushed. May be skipped only when that exact tree
+         already passed a full run:
+         - in a queue: `git rev-parse main^{tree}` equals the ticket's `tested_tree`
+         - alone: the task was tagged `full-suite-at-gate2: yes` and no other commit
+           landed on `origin/main` since the branch's last rebase
+         Otherwise mandatory. In a queue, set `state: releasing:suite` and broadcast
+         `TEAM-QUEUE` BEFORE dispatching betty, and set `state: releasing` again (and
+         broadcast) when she reports.
 STEP 11: If the suite fails → local `main` is NOT published: `git reset --hard
          origin/main` in the main checkout to park it, STOP all new task assignments, and
          Tina dispatches a dev with the failures as highest priority on the task branch →
-         the fix passes all gates from STEP 5 before anything is pushed
+         the fix passes all gates from STEP 5 before anything is pushed. In a queue:
+         delete the ticket and broadcast `TEAM-QUEUE`; the fix rejoins at the back
 
          ⛔ GATE 4 — Do NOT push until betty-bugsniff reports the full suite PASS on the
          merged local `main` (or STEP 10 was legitimately skipped per its
-         no-other-commits condition)
+         same-tree condition)
 
-STEP 12: RELEASE — Tina dispatches daisy-deployer with the merged commit and the tag (if
-         the repo releases by tag). Daisy pushes `main`, WATCHES the CI/CD pipeline to
+STEP 12: RELEASE — Tina dispatches daisy-deployer with the merged commit, the tag (if
+         the repo releases by tag), and either "no release queue active" or this
+         task's ticket name as head of the queue. Daisy pushes `main`, WATCHES the CI/CD pipeline to
          completion, verifies production health per the `### Target: Production` section
          of /docs/DEVOPS.md, and rolls back on a failed pipeline or unhealthy prod
          (redeploy the known-good release, or `git revert <sha> && git push` — never a
          force-push). The push is the deployment, so nobody reports success until prod is
-         verified. If the push is rejected because main moved again → back to STEP 9; if
+         verified. If the push is rejected because main moved again → back to STEP 9
+         (in a queue, keeping the slot); if
          it is rejected by branch protection, stop and follow the override rule in the
          Integration Model section.
 
          ⛔ GATE 5 — The task is not done until daisy returns PASS with the pipeline run
          and the production checks. On FAIL: rollback first, then the failure goes to the
-         dev and the fix re-enters at STEP 5.
+         dev and the fix re-enters at STEP 5 (in a queue: delete the ticket and
+         broadcast `TEAM-QUEUE` once the rollback is confirmed).
 
 STEP 13: After Gate 5, Tina removes the worktree, deletes the branch (local and remote),
-         and refreshes the main checkout (`git fetch origin && git pull --ff-only`).
+         and refreshes the main checkout (`git fetch origin && git pull --ff-only`). In
+         a queue: delete the ticket, broadcast `TEAM-QUEUE`, then `TEAM-DONE`.
 STEP 14: Tina assigns the next task
 ```
 
