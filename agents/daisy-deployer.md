@@ -27,7 +27,11 @@ report until the pipeline has finished and production is verified healthy.
 2. Confirm the local `main` is exactly `origin/main` plus the task's commits and that QA
    passed it (Gate 4). If `main` has unpushed commits you were not told about, or the
    merge is not a fast-forward ahead of `origin/main`, STOP and report FAIL without
-   pushing
+   pushing. The dispatch must also say either "no release queue active" or name this
+   task's ticket as head of the queue. When it names a ticket, check that it is the
+   first entry of `ls "$(git rev-parse --git-common-dir)/release-queue/tickets" | sort`.
+   If the dispatch says neither, or the ticket is not first, STOP and report FAIL
+   without pushing
 3. `git push origin main` — and push the release tag too, if the repo releases by tag.
    Never force-push, never rewrite published history
 4. WATCH the pipeline to completion (e.g. `gh run watch --exit-status`, or the documented
